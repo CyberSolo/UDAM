@@ -1,9 +1,19 @@
+# Node
 node_modules/
-frontend/.next/
-frontend/node_modules/
-backend/node_modules/
-ide-plugin/node_modules/
-.env
+npm-debug.log*
+yarn.lock
+package-lock.json
+
+# OS
 .DS_Store
+
+# Build outputs
+frontend/.next/
+
+# Env files
+.env*
+backend/.env*
+frontend/.env*
+
+# Logs
 *.log
-data/postgres/

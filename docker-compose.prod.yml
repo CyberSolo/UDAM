@@ -5,10 +5,8 @@ services:
       - POSTGRES_USER=udam
       - POSTGRES_PASSWORD=udam
       - POSTGRES_DB=udam
-    ports:
-      - "5432:5432"
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data
+      - ./data/postgres_prod:/var/lib/postgresql/data
       - ./deploy/db/init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
     restart: unless-stopped
   backend:
@@ -23,6 +21,7 @@ services:
       - CANCEL_URL=${CANCEL_URL}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
     depends_on:
       - postgres
     ports:
@@ -36,6 +35,6 @@ services:
       - postgres
     volumes:
       - ./backend/migrations:/migrations:ro
-    entrypoint: ["bash","-lc"]
-    command: "for f in /migrations/*.sql; do echo Applying $f; psql -h postgres -U udam -d udam -f \"$f\"; done"
+      - ./deploy/db/migrate.sh:/scripts/migrate.sh:ro
+    entrypoint: ["/bin/sh","/scripts/migrate.sh"]
     restart: "no"

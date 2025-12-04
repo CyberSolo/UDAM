@@ -1,0 +1,10 @@
+{
+  "name": "@udam/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "exports": "./index.js",
+  "types": "index.d.ts"
+  ,"private": false,
+  "files": ["index.js", "index.d.ts"]
+}
