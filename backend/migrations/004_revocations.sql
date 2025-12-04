@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+  id SERIAL PRIMARY KEY,
+  jti TEXT UNIQUE NOT NULL,
+  user_id INTEGER REFERENCES users(id),
+  created_at TIMESTAMP DEFAULT NOW()
+);

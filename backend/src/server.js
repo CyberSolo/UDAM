@@ -37,6 +37,13 @@ app.use((req, res, next) => {
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const smallLimit = parseFloat(process.env.SMALL_LIMIT || "5");
 const port = process.env.PORT || 4000;
+const validateEnv = () => {
+  const s = String(process.env.SESSION_SECRET || "");
+  if (s.length < 16) throw new Error("bad_session_secret");
+  const mk = String(process.env.MARKETPLACE_MASTER_KEY || "");
+  const buf = Buffer.from(mk, "hex");
+  if (buf.length !== 32) throw new Error("bad_master_key");
+};
 app.post("/auth/login", async (req, res) => {
   const email = String(req.body.email || "").toLowerCase();
   const provider = String(req.body.oauth_provider || "email");
@@ -55,6 +62,11 @@ app.get("/listings", async (req, res) => {
     "SELECT id, service_name, price_per_unit, unit_description, available_units FROM listings WHERE status='active' ORDER BY id DESC"
   );
   res.json(r.rows);
+});
+app.post("/auth/logout", requireAuth, async (req, res) => {
+  if (!req.jti) return res.status(200).json({ ok: true });
+  await query("INSERT INTO revoked_tokens(jti, user_id) VALUES($1,$2) ON CONFLICT (jti) DO NOTHING", [req.jti, req.userId]);
+  res.json({ ok: true });
 });
 app.post("/listings", requireAuth, async (req, res) => {
   const owner_id = req.userId;
@@ -290,5 +302,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "internal" });
 });
 init().then(() => {
+  validateEnv();
   app.listen(port, () => {});
 });
