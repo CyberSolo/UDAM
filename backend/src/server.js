@@ -36,6 +36,7 @@ app.use((req, res, next) => {
 });
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const smallLimit = parseFloat(process.env.SMALL_LIMIT || "5");
+const acceptanceWindowSec = parseInt(process.env.ACCEPTANCE_WINDOW_SEC || "600");
 const port = process.env.PORT || 4000;
 const validateEnv = () => {
   const s = String(process.env.SESSION_SECRET || "");
@@ -122,7 +123,8 @@ app.post("/orders", requireAuth, async (req, res) => {
     let payment_url = null;
     let payment_requires_confirmation = false;
     if (Number(payment_amount) <= smallLimit) {
-      await query("UPDATE orders SET payment_status='paid' WHERE id=$1", [order_id]);
+      const deadline = new Date(Date.now() + acceptanceWindowSec * 1000);
+      await query("UPDATE orders SET payment_status='paid', escrow_status='held', acceptance_deadline=$2 WHERE id=$1", [order_id, deadline]);
       const apiKey = decrypt(listing.api_key_encrypted);
       const expires_at = new Date(Date.now() + 30 * 24 * 3600 * 1000);
     const encToken = encrypt(apiKey);
@@ -216,7 +218,8 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
         );
         const row = lr.rows[0];
         if (row) {
-          await query("UPDATE orders SET payment_status='paid' WHERE id=$1", [order_id]);
+          const deadline = new Date(Date.now() + acceptanceWindowSec * 1000);
+          await query("UPDATE orders SET payment_status='paid', escrow_status='held', acceptance_deadline=$2 WHERE id=$1", [order_id, deadline]);
           const apiKey = decrypt(row.api_key_encrypted);
           const expires_at = new Date(Date.now() + 30 * 24 * 3600 * 1000);
         const encToken = encrypt(apiKey);
@@ -278,7 +281,8 @@ app.get("/orders/dev/confirm/:id", async (req, res) => {
       await query("ROLLBACK");
       return res.status(404).json({ error: "not_found" });
     }
-    await query("UPDATE orders SET payment_status='paid' WHERE id=$1", [order_id]);
+    const deadline = new Date(Date.now() + acceptanceWindowSec * 1000);
+    await query("UPDATE orders SET payment_status='paid', escrow_status='held', acceptance_deadline=$2 WHERE id=$1", [order_id, deadline]);
     const apiKey = decrypt(row.api_key_encrypted);
     const expires_at = new Date(Date.now() + 30 * 24 * 3600 * 1000);
   const encToken = encrypt(apiKey);
@@ -297,6 +301,75 @@ app.get("/orders/dev/confirm/:id", async (req, res) => {
   }
   const success = `${process.env.SUCCESS_URL || "http://localhost:3000"}/orders/success?order_id=${order_id}`;
   res.redirect(success);
+});
+app.post("/orders/:id/accept", requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  const r = await query("UPDATE orders SET accepted_at=NOW(), escrow_status='released' WHERE id=$1 AND buyer_id=$2 RETURNING id", [id, req.userId]);
+  if (!r.rows[0]) return res.status(404).json({ error: "not_found" });
+  res.json({ ok: true });
+});
+app.post("/orders/:id/dispute", requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  const { reason, evidence } = req.body || {};
+  await query("BEGIN");
+  try {
+    const r = await query("UPDATE orders SET dispute_status='buyer_disputed' WHERE id=$1 AND buyer_id=$2 RETURNING id", [id, req.userId]);
+    if (!r.rows[0]) {
+      await query("ROLLBACK");
+      return res.status(404).json({ error: "not_found" });
+    }
+    await query("INSERT INTO disputes(order_id, created_by, role, reason, evidence) VALUES($1,$2,'buyer',$3,$4)", [id, req.userId, String(reason||''), String(evidence||'')]);
+    await query("COMMIT");
+    res.json({ ok: true });
+  } catch (e) {
+    await query("ROLLBACK");
+    throw e;
+  }
+});
+app.post("/orders/:id/counter", requireAuth, async (req, res) => {
+  const id = parseInt(req.params.id);
+  const { reason, evidence } = req.body || {};
+  const lr = await query("SELECT l.owner_id FROM orders o JOIN listings l ON o.listing_id=l.id WHERE o.id=$1", [id]);
+  const owner = lr.rows[0]?.owner_id;
+  if (owner !== req.userId) return res.status(403).json({ error: "forbidden" });
+  await query("BEGIN");
+  try {
+    await query("UPDATE orders SET dispute_status='seller_countered' WHERE id=$1", [id]);
+    await query("INSERT INTO disputes(order_id, created_by, role, reason, evidence) VALUES($1,$2,'seller',$3,$4)", [id, req.userId, String(reason||''), String(evidence||'')]);
+    await query("COMMIT");
+    res.json({ ok: true });
+  } catch (e) {
+    await query("ROLLBACK");
+    throw e;
+  }
+});
+const requireAdmin = (req, res, next) => {
+  const t = req.headers["x-admin-token"] || "";
+  if (!process.env.ADMIN_TOKEN || t !== process.env.ADMIN_TOKEN) return res.status(401).json({ error: "unauthorized" });
+  next();
+};
+app.post("/orders/:id/adjudicate", requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id);
+  const decision = String(req.body.decision || "");
+  if (!["refund","release"].includes(decision)) return res.status(400).json({ error: "bad_decision" });
+  await query("BEGIN");
+  try {
+    if (decision === "refund") {
+      await query("UPDATE orders SET escrow_status='refunded', adjudicated_at=NOW(), adjudication_result='refund', dispute_status='resolved' WHERE id=$1", [id]);
+      await query("UPDATE tokens SET expires_at=NOW() WHERE order_id=$1", [id]);
+    } else {
+      await query("UPDATE orders SET escrow_status='released', adjudicated_at=NOW(), adjudication_result='release', dispute_status='resolved' WHERE id=$1", [id]);
+    }
+    await query("COMMIT");
+    res.json({ ok: true });
+  } catch (e) {
+    await query("ROLLBACK");
+    throw e;
+  }
+});
+app.post("/orders/cron/auto-release", requireAdmin, async (req, res) => {
+  const r = await query("UPDATE orders SET escrow_status='released' WHERE escrow_status='held' AND (dispute_status IS NULL OR dispute_status='') AND acceptance_deadline<NOW() RETURNING id");
+  res.json({ released: r.rows.length });
 });
 app.use((err, req, res, next) => {
   res.status(500).json({ error: "internal" });
