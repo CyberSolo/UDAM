@@ -57,6 +57,17 @@ jobs:
         run: |
           for i in {1..10}; do curl -sSf http://localhost:4000/healthz && exit 0 || sleep 2; done
           exit 1
+      - name: E2E small-limit flow
+        run: |
+          set -e
+          TOKEN=$(curl -s -X POST http://localhost:4000/auth/login -H 'Content-Type: application/json' -d '{"email":"ci@example.com","oauth_provider":"email"}' | node -e "const fs=require('fs'); const j=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(j.session_token||'')")
+          test -n "$TOKEN"
+          LISTING_ID=$(curl -s -X POST http://localhost:4000/listings -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"service_name":"CI Service","api_key":"CIKEY","price_per_unit":"1","unit_description":"per request","available_units":"3"}' | node -e "const fs=require('fs'); const j=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(String(j.id||''))")
+          test -n "$LISTING_ID"
+          ORDER_JSON=$(curl -s -X POST http://localhost:4000/orders -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"listing_id":'"$LISTING_ID"',"units_requested":1}')
+          echo "$ORDER_JSON" | node -e "const fs=require('fs'); const j=JSON.parse(fs.readFileSync(0,'utf8')); if(!(j.payment_requires_confirmation===false)) process.exit(1)"
+          TOKENS=$(curl -s http://localhost:4000/tokens -H "Authorization: Bearer $TOKEN")
+          echo "$TOKENS" | node -e "const fs=require('fs'); const j=JSON.parse(fs.readFileSync(0,'utf8')); if(!Array.isArray(j) || j.length<1) process.exit(1)"
       - name: Stop backend
         run: |
           kill $(cat backend/backend_pid) || true
