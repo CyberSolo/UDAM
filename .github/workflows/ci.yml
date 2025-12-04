@@ -37,6 +37,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client
           for i in {1..30}; do pg_isready -h 127.0.0.1 -p 5432 && break || sleep 2; done
+      - name: Apply SQL migrations
+        run: |
+          psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -f backend/migrations/001_init.sql
+        env:
+          PGPASSWORD: postgres
       - name: Start backend
         env:
           SESSION_SECRET: devsecret
