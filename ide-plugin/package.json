@@ -1,0 +1,20 @@
+{
+  "name": "udam-vscode",
+  "displayName": "Unified Data Marketplace",
+  "version": "0.1.0",
+  "publisher": "udam",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "udam.login", "title": "UDAM: Login" },
+      { "command": "udam.fetchListings", "title": "UDAM: Fetch Listings" },
+      { "command": "udam.fetchTokens", "title": "UDAM: Fetch Tokens" },
+      { "command": "udam.writeTokens", "title": "UDAM: Write Tokens File" }
+    ],
+    "views": { "explorer": [{ "id": "udamView", "name": "UDAM" }] }
+  },
+  "dependencies": {}
+}
