@@ -66,55 +66,72 @@ app.post("/orders", requireAuth, async (req, res) => {
   const units = parseInt(req.body.units_requested || req.body.units || 1);
   if (!listing_id || !units) return res.status(400).json({ error: "missing_fields" });
   if (!Number.isInteger(units) || units <= 0 || units > 1e6) return res.status(400).json({ error: "bad_units" });
-  const lr = await query("SELECT id, price_per_unit, available_units, api_key_encrypted, service_name FROM listings WHERE id=$1", [listing_id]);
-  const listing = lr.rows[0];
-  if (!listing) return res.status(404).json({ error: "listing_not_found" });
-  if (listing.available_units < units) return res.status(400).json({ error: "insufficient_units" });
-  const payment_amount = Number(listing.price_per_unit) * units;
-  const or = await query(
-    "INSERT INTO orders(buyer_id, listing_id, units, payment_amount, payment_status) VALUES($1,$2,$3,$4,'pending') RETURNING id",
-    [buyer_id, listing_id, units, payment_amount]
-  );
-  const order_id = or.rows[0].id;
-  let payment_url = null;
-  let payment_requires_confirmation = false;
-  if (payment_amount <= smallLimit) {
-    await query("UPDATE orders SET payment_status='paid' WHERE id=$1", [order_id]);
-    const apiKey = decrypt(listing.api_key_encrypted);
-    const expires_at = new Date(Date.now() + 30 * 24 * 3600 * 1000);
-    await query(
-      "INSERT INTO tokens(order_id, service_name, api_key_plain, expires_at) VALUES($1,$2,$3,$4)",
-      [order_id, listing.service_name, apiKey, expires_at]
+  await query("BEGIN");
+  try {
+    const lr = await query(
+      "SELECT id, price_per_unit, available_units, api_key_encrypted, service_name FROM listings WHERE id=$1 FOR UPDATE",
+      [listing_id]
     );
-    await query(
-      "UPDATE listings SET available_units=available_units-$1, status=CASE WHEN available_units-$1<=0 THEN 'sold_out' ELSE status END WHERE id=$2",
-      [units, listing_id]
-    );
-  } else {
-    payment_requires_confirmation = true;
-    if (!process.env.STRIPE_SECRET_KEY) {
-      payment_url = `${process.env.BACKEND_PUBLIC_URL || `http://localhost:${port}`}/orders/dev/confirm/${order_id}`;
-    } else {
-      const session = await stripe.checkout.sessions.create({
-        mode: "payment",
-        line_items: [
-          {
-            price_data: {
-              currency: "usd",
-              product_data: { name: listing.service_name },
-              unit_amount: Math.round(Number(listing.price_per_unit) * 100),
-            },
-            quantity: units,
-          },
-        ],
-        success_url: `${process.env.SUCCESS_URL || "http://localhost:3000"}/orders/success?order_id=${order_id}`,
-        cancel_url: `${process.env.CANCEL_URL || "http://localhost:3000"}/orders/cancel?order_id=${order_id}`,
-        metadata: { order_id: String(order_id), buyer_id: String(buyer_id) },
-      });
-      payment_url = session.url;
+    const listing = lr.rows[0];
+    if (!listing) {
+      await query("ROLLBACK");
+      return res.status(404).json({ error: "listing_not_found" });
     }
+    if (listing.available_units < units) {
+      await query("ROLLBACK");
+      return res.status(400).json({ error: "insufficient_units" });
+    }
+    const payment_amount = ((Math.round(Number(listing.price_per_unit) * 100) * units) / 100).toFixed(2);
+    const or = await query(
+      "INSERT INTO orders(buyer_id, listing_id, units, payment_amount, payment_status) VALUES($1,$2,$3,$4,'pending') RETURNING id",
+      [buyer_id, listing_id, units, payment_amount]
+    );
+    const order_id = or.rows[0].id;
+    let payment_url = null;
+    let payment_requires_confirmation = false;
+    if (Number(payment_amount) <= smallLimit) {
+      await query("UPDATE orders SET payment_status='paid' WHERE id=$1", [order_id]);
+      const apiKey = decrypt(listing.api_key_encrypted);
+      const expires_at = new Date(Date.now() + 30 * 24 * 3600 * 1000);
+      await query(
+        "INSERT INTO tokens(order_id, service_name, api_key_plain, expires_at) VALUES($1,$2,$3,$4)",
+        [order_id, listing.service_name, apiKey, expires_at]
+      );
+      await query(
+        "UPDATE listings SET available_units=available_units-$1, status=CASE WHEN available_units-$1<=0 THEN 'sold_out' ELSE status END WHERE id=$2",
+        [units, listing_id]
+      );
+      await query("COMMIT");
+    } else {
+      await query("COMMIT");
+      payment_requires_confirmation = true;
+      if (!process.env.STRIPE_SECRET_KEY) {
+        payment_url = `${process.env.BACKEND_PUBLIC_URL || `http://localhost:${port}`}/orders/dev/confirm/${order_id}`;
+      } else {
+        const session = await stripe.checkout.sessions.create({
+          mode: "payment",
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: { name: listing.service_name },
+                unit_amount: Math.round(Number(listing.price_per_unit) * 100),
+              },
+              quantity: units,
+            },
+          ],
+          success_url: `${process.env.SUCCESS_URL || "http://localhost:3000"}/orders/success?order_id=${order_id}`,
+          cancel_url: `${process.env.CANCEL_URL || "http://localhost:3000"}/orders/cancel?order_id=${order_id}`,
+          metadata: { order_id: String(order_id), buyer_id: String(buyer_id) },
+        });
+        payment_url = session.url;
+      }
+    }
+    res.json({ order_id, payment_amount, payment_requires_confirmation, payment_url });
+  } catch (e) {
+    await query("ROLLBACK");
+    throw e;
   }
-  res.json({ order_id, payment_amount, payment_requires_confirmation, payment_url });
 });
 app.get("/orders/:id", requireAuth, async (req, res) => {
   const id = parseInt(req.params.id);
@@ -142,20 +159,35 @@ app.post("/webhooks/stripe", bodyParser.raw({ type: "application/json" }), async
     const s = event.data.object;
     const order_id = parseInt(s.metadata?.order_id || "0");
     if (order_id) {
-      const lr = await query("SELECT listings.api_key_encrypted, listings.service_name, orders.listing_id, orders.units FROM orders JOIN listings ON orders.listing_id=listings.id WHERE orders.id=$1", [order_id]);
-      const row = lr.rows[0];
-      if (row) {
-        await query("UPDATE orders SET payment_status='paid' WHERE id=$1", [order_id]);
-        const apiKey = decrypt(row.api_key_encrypted);
-        const expires_at = new Date(Date.now() + 30 * 24 * 3600 * 1000);
-        await query(
-          "INSERT INTO tokens(order_id, service_name, api_key_plain, expires_at) VALUES($1,$2,$3,$4)",
-          [order_id, row.service_name, apiKey, expires_at]
+      const ins = await query(
+        "INSERT INTO webhook_events(source, event_id) VALUES($1,$2) ON CONFLICT (event_id) DO NOTHING RETURNING id",
+        ["stripe", event.id]
+      );
+      if (ins.rows.length === 0) return res.json({ received: true });
+      await query("BEGIN");
+      try {
+        const lr = await query(
+          "SELECT listings.api_key_encrypted, listings.service_name, orders.listing_id, orders.units FROM orders JOIN listings ON orders.listing_id=listings.id WHERE orders.id=$1 FOR UPDATE",
+          [order_id]
         );
-        await query(
-          "UPDATE listings SET available_units=available_units-$1, status=CASE WHEN available_units-$1<=0 THEN 'sold_out' ELSE status END WHERE id=$2",
-          [row.units, row.listing_id]
-        );
+        const row = lr.rows[0];
+        if (row) {
+          await query("UPDATE orders SET payment_status='paid' WHERE id=$1", [order_id]);
+          const apiKey = decrypt(row.api_key_encrypted);
+          const expires_at = new Date(Date.now() + 30 * 24 * 3600 * 1000);
+          await query(
+            "INSERT INTO tokens(order_id, service_name, api_key_plain, expires_at) VALUES($1,$2,$3,$4)",
+            [order_id, row.service_name, apiKey, expires_at]
+          );
+          await query(
+            "UPDATE listings SET available_units=available_units-$1, status=CASE WHEN available_units-$1<=0 THEN 'sold_out' ELSE status END WHERE id=$2",
+            [row.units, row.listing_id]
+          );
+        }
+        await query("COMMIT");
+      } catch (e) {
+        await query("ROLLBACK");
+        throw e;
       }
     }
   }
@@ -190,25 +222,38 @@ app.use((req, res, next) => {
 app.get("/orders/dev/confirm/:id", async (req, res) => {
   if (process.env.STRIPE_SECRET_KEY) return res.status(400).json({ error: "stripe_configured" });
   const order_id = parseInt(req.params.id);
-  const lr = await query(
-    "SELECT listings.api_key_encrypted, listings.service_name, orders.listing_id, orders.units FROM orders JOIN listings ON orders.listing_id=listings.id WHERE orders.id=$1",
-    [order_id]
-  );
-  const row = lr.rows[0];
-  if (!row) return res.status(404).json({ error: "not_found" });
-  await query("UPDATE orders SET payment_status='paid' WHERE id=$1", [order_id]);
-  const apiKey = decrypt(row.api_key_encrypted);
-  const expires_at = new Date(Date.now() + 30 * 24 * 3600 * 1000);
-  await query(
-    "INSERT INTO tokens(order_id, service_name, api_key_plain, expires_at) VALUES($1,$2,$3,$4)",
-    [order_id, row.service_name, apiKey, expires_at]
-  );
-  await query(
-    "UPDATE listings SET available_units=available_units-$1, status=CASE WHEN available_units-$1<=0 THEN 'sold_out' ELSE status END WHERE id=$2",
-    [row.units, row.listing_id]
-  );
+  await query("BEGIN");
+  try {
+    const lr = await query(
+      "SELECT listings.api_key_encrypted, listings.service_name, orders.listing_id, orders.units FROM orders JOIN listings ON orders.listing_id=listings.id WHERE orders.id=$1 FOR UPDATE",
+      [order_id]
+    );
+    const row = lr.rows[0];
+    if (!row) {
+      await query("ROLLBACK");
+      return res.status(404).json({ error: "not_found" });
+    }
+    await query("UPDATE orders SET payment_status='paid' WHERE id=$1", [order_id]);
+    const apiKey = decrypt(row.api_key_encrypted);
+    const expires_at = new Date(Date.now() + 30 * 24 * 3600 * 1000);
+    await query(
+      "INSERT INTO tokens(order_id, service_name, api_key_plain, expires_at) VALUES($1,$2,$3,$4)",
+      [order_id, row.service_name, apiKey, expires_at]
+    );
+    await query(
+      "UPDATE listings SET available_units=available_units-$1, status=CASE WHEN available_units-$1<=0 THEN 'sold_out' ELSE status END WHERE id=$2",
+      [row.units, row.listing_id]
+    );
+    await query("COMMIT");
+  } catch (e) {
+    await query("ROLLBACK");
+    throw e;
+  }
   const success = `${process.env.SUCCESS_URL || "http://localhost:3000"}/orders/success?order_id=${order_id}`;
   res.redirect(success);
+});
+app.use((err, req, res, next) => {
+  res.status(500).json({ error: "internal" });
 });
 init().then(() => {
   app.listen(port, () => {});

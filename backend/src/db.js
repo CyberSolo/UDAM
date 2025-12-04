@@ -15,6 +15,9 @@ export const init = async () => {
   await query(
     "CREATE TABLE IF NOT EXISTS tokens (id SERIAL PRIMARY KEY, order_id INTEGER REFERENCES orders(id), service_name TEXT NOT NULL, api_key_plain TEXT NOT NULL, expires_at TIMESTAMP NOT NULL, created_at TIMESTAMP DEFAULT NOW())"
   );
+  await query(
+    "CREATE TABLE IF NOT EXISTS webhook_events (id SERIAL PRIMARY KEY, source TEXT NOT NULL, event_id TEXT UNIQUE NOT NULL, created_at TIMESTAMP DEFAULT NOW())"
+  );
   await query("CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status)");
   await query("CREATE INDEX IF NOT EXISTS idx_orders_buyer ON orders(buyer_id)");
   await query("CREATE INDEX IF NOT EXISTS idx_orders_listing ON orders(listing_id)");
