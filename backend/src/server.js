@@ -328,6 +328,11 @@ app.use((req, res, next) => {
   if (b.c > limitCount) return res.status(429).json({ error: "rate_limited" });
   next();
 });
+const requireAdmin = (req, res, next) => {
+  const t = req.headers["x-admin-token"] || "";
+  if (!process.env.ADMIN_TOKEN || t !== process.env.ADMIN_TOKEN) return res.status(401).json({ error: "unauthorized" });
+  next();
+};
 // Dev-only payment confirmation when Stripe is not configured
 app.get("/orders/dev/confirm/:id", async (req, res) => {
   if (process.env.STRIPE_SECRET_KEY) return res.status(400).json({ error: "stripe_configured" });
@@ -472,11 +477,6 @@ app.get("/users/:id/ratings", async (req, res) => {
   );
   res.json({ avg_score: Number(agg.rows[0]?.avg_score || 0), count: parseInt(agg.rows[0]?.count || 0), recent: list.rows });
 });
-const requireAdmin = (req, res, next) => {
-  const t = req.headers["x-admin-token"] || "";
-  if (!process.env.ADMIN_TOKEN || t !== process.env.ADMIN_TOKEN) return res.status(401).json({ error: "unauthorized" });
-  next();
-};
 app.post("/orders/:id/adjudicate", requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id);
   const decision = String(req.body.decision || "");
