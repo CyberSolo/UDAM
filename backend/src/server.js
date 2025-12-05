@@ -638,7 +638,19 @@ app.get("/dashboard/me", requireAuth, async (req, res) => {
 app.use((err, req, res, next) => {
   res.status(500).json({ error: "internal" });
 });
-init().then(() => {
-  validateEnv();
-  app.listen(port, () => {});
-});
+init()
+  .then(() => {
+    try {
+      validateEnv();
+      app.listen(port, "0.0.0.0", () => {
+        console.log(`Server listening on port ${port}`);
+      });
+    } catch (e) {
+      console.error("Startup validation failed:", e);
+      process.exit(1);
+    }
+  })
+  .catch((e) => {
+    console.error("Database init failed:", e);
+    process.exit(1);
+  });
