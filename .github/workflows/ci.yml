@@ -43,7 +43,7 @@ jobs:
           PGPASSWORD: postgres
       - name: Start backend
         env:
-          SESSION_SECRET: devsecret
+          SESSION_SECRET: devsecretdevsecret1234
           MARKETPLACE_MASTER_KEY: 0000000000000000000000000000000000000000000000000000000000000000
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
           SMALL_LIMIT: 5
